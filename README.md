@@ -1,6 +1,6 @@
 # FacebookAdsLibraryScraper
 
 ## TODO
-[-] check if found.db else init_db
-[-] check timer
-[-] fix db query
+- [x] check if found.db else init_db
+- [x] check timer
+- [x] fix db query
