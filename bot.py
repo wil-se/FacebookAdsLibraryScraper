@@ -15,8 +15,9 @@ import pycountry
 from requests_html import HTMLSession
 from fake_useragent import UserAgent
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 import configparser
+import random
 from pprint import PrettyPrinter
 import sys
 pp = PrettyPrinter()
@@ -36,18 +37,13 @@ class FacebookScraperWorker():
     keyword = ''
     cookies = {}
     sleep = 10
-    proxy_ip = None
-    proxy_port = None
-    proxy_username = None
-    proxy_apikey = None
     referrer = ''
-    ids = []
-    forwardCursor = ''
-    collationToken = ''
-    backwardCursor = ''
+    spawnTime = datetime.now()
+    maxTimeAllowed = 15*60 # seconds
     
     
-    def __init__(self, settings="./config.cfg", db_path='found.db', sleep=10, id=0, active_ads=1, date_from="", date_to="", country="", keyword=""):
+    def __init__(self, maxTimeAllowed=15*60, settings="./config.cfg", db_path='found.db', sleep=10, id=0, active_ads=1, date_from="", date_to="", country="", keyword=""):
+        self.maxTimeAllowed = maxTimeAllowed
         self.settings = settings
         self.connection = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.connection.cursor()
@@ -55,42 +51,42 @@ class FacebookScraperWorker():
         self.active_ads = active_ads
         self.date_from = date_from
         self.date_to = date_to
-        self.country = country
-        try:
-            self.country_alpha2 = pycountry.countries.get(name=country).alpha_2
-        except:
-            print(country)
+        (self.country_alpha2, self.country) = self.get_safe_country(country)
         self.keyword = keyword
         self.sleep = sleep
         if not os.path.exists('logs'):
             os.mkdir('logs')
-        self.log = logging.getLogger(f'FacebookWorker_{self.id}')
+        self.log = logging.getLogger(f'FacebookWorker_{self.id}_{self.keyword}_{random.randint(0, 99999999999)}')
         FORMAT = '[%(asctime)s %(filename)s->%(funcName)s():%(lineno)s]%(levelname)s: %(message)s'
         logfile = time.strftime(f'logs/worker_{id}_{self.country_alpha2}_{keyword}_%Y-%m-%d.log')
         logging.basicConfig(level=logging.INFO, filename=logfile, filemode='a+', format=FORMAT)
         handler = handlers.RotatingFileHandler(logfile, maxBytes=1000000, backupCount=10)
         self.log.addHandler(handler)
         self.log.addHandler(logging.StreamHandler(sys.stdout))
-        # self.log.info(f'address: {self.getIP()}')
         self.referrer = f'https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country={self.country_alpha2}&media_type=all'
 
     def __del__(self):
         self.connection.close()
 
-    def getIP(self):
+    def get_safe_country(self, name):
         try:
-            d = requests.get('http://checkip.dyndns.com/', proxies=self.get_proxy()).text
-            return re.compile(r'Address: (\d+\.\d+\.\d+\.\d+)').search(d).group(1)
+            countries = {
+                'United States of America': 'United States'
+            }
+            if name in countries.keys():
+                return (pycountry.countries.get(name=countries[name]).alpha_2, countries[name])
+            return (pycountry.countries.get(name=name).alpha_2, name)
         except:
-            return self.getIP()
+            return ('','')
 
     def rget(self, url, headers={}, allow_redirects=True, timeout=10, proxies={}):
         try:
             r = requests.get(url, headers=headers, allow_redirects=allow_redirects, timeout=timeout, proxies=proxies)
             return r
         except Exception as e:
-            self.log.info(e)
-            self.log.info(f'GET request failed, retrying')
+            # self.log.info(e)
+            # self.log.info(f'GET request failed, retrying')
+            time.sleep(self.sleep)
             self.rget(url, headers=headers, allow_redirects=allow_redirects, timeout=timeout, proxies=proxies)
 
     def rspost(self, url, session, data={}, headers={}, allow_redirects=True, timeout=10, proxies={}):
@@ -98,25 +94,32 @@ class FacebookScraperWorker():
             r = session.post(url, data=data, headers=headers, allow_redirects=allow_redirects, timeout=timeout, proxies=proxies)
             return r
         except Exception as e:
-            self.log.info(e)
-            self.log.info(f'POST request failed, retrying')
+            # self.log.info(e)
+            # self.log.info(f'POST request failed, retrying')
             time.sleep(self.sleep)
             return self.rspost(url, session, data=data, headers=headers, allow_redirects=allow_redirects, timeout=timeout, proxies=proxies)
 
     def get_proxy(self):
-        configParser = configparser.RawConfigParser()
-        configParser.read(self.settings)
-        self.proxy_username = configParser.get('credentials', 'username')
-        self.proxy_apikey = configParser.get('credentials', 'apikey')
-        self.proxy_ip = configParser.get('credentials', 'host')
-        self.proxy_port = configParser.get('credentials','port')
-        url = f'http://{self.proxy_username}:{self.proxy_apikey}@{self.proxy_ip}:{self.proxy_port}'
-        return {
-            'http': url,
-            'https': url
-        }
+        try:
+            configParser = configparser.RawConfigParser()
+            configParser.read(self.settings)
+            proxy_username = configParser.get('credentials', 'username')
+            proxy_apikey = configParser.get('credentials', 'apikey')
+            proxy_ip = configParser.get('credentials', 'host')
+            proxy_port = configParser.get('credentials','port')
+            url = f'http://{proxy_username}:{proxy_apikey}@{proxy_ip}:{proxy_port}'
+            return {
+                'http': url,
+                'https': url
+            }
+        except:
+            self.log.info('there was an error while loading configurations, please check config.cfg')
+            return {
+                'http': '',
+                'https': ''
+            }
 
-    def get_cookies(self, keepsession=False):
+    def get_cookies(self, keepsession=False, keepcursor=False):
         try:
             self.log.info(f'Getting cookies {self.country_alpha2} {self.keyword}')
             r = self.rget(self.referrer, proxies=self.get_proxy())
@@ -128,55 +131,61 @@ class FacebookScraperWorker():
             self.cookies['hsi'] = re.findall('hsi\\":\\"(.*?)\\",', response_text)[0]
             if not keepsession:
                 self.cookies['sessionid'] = re.findall('sessionId\\":\\"(.*?)\\",', response_text)[0]
+            if not keepcursor:                
                 self.cookies['forwardCursor'] = ''
                 self.cookies['collationToken'] = ''
             return self.cookies
         except Exception as e:
-            self.log.info(e)
+            # self.log.info(e)
             self.log.info(f'Cookie generation failed for {self.country_alpha2} {self.keyword}, retrying')
             time.sleep(self.sleep)
             return self.get_cookies()
 
     def get_product(self, id):
-        return self.cursor.execute(f'SELECT * FROM products WHERE adid="{id}"').fetchone()
+        try:
+            return self.cursor.execute(f'SELECT * FROM products WHERE adid="{id}"').fetchone()
+        except:
+            self.log.info('error while executing database query')
 
     def sanitize(self, string):
         return string.replace('"', '')
 
-    # TODO: INIT DB
-    # adid -> unique
-    # fix insert values
-
     def create_product(self, adid, active_ads, country, adtitle, keyword, pageurl, adsonpage, adurl, creation_time, tag='dropship'):
-        self.log.info(f'creating product {adid} {keyword}')
-        query = f'INSERT OR IGNORE INTO products (adid,active_ads,country,adtitle,keyword,pageurl,adsonpage,adurl,creation_time,tag)\
-            VALUES ("{adid}", {active_ads}, "{country}", "{self.sanitize(adtitle)}", "{keyword}", "{pageurl}", "{adsonpage}", "{adurl}", "{creation_time}", "{tag}" )'
-        self.cursor.execute(query)
-        self.connection.commit()
+        try:
+            self.log.info(f'creating product {adid} {keyword}')
+            query = f'INSERT OR IGNORE INTO products (adid,active_ads,country,adtitle,keyword,pageurl,adsonpage,adurl,creation_time,tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            self.cursor.execute(query, [adid, active_ads, country, self.sanitize(adtitle), keyword, pageurl, adsonpage, adurl, creation_time, tag])
+            self.connection.commit()
+        except:
+            self.log.info('error while executing database query')
+
 
     def update_product(self, adid, active_ads, country, adtitle, keyword, pageurl, adsonpage, adurl, creation_time, tag='dropship'):
-        self.log.info(f'updating product {adid} {keyword}')
-        query = f'UPDATE products SET active_ads={active_ads}, country="{country}", adtitle="{self.sanitize(adtitle)}", keyword="{keyword}", pageurl="{pageurl}", adsonpage="{adsonpage}", adurl="{adurl}", creation_time="{creation_time}", tag="{tag}" WHERE adid={adid}'
-        self.cursor.execute(query)
-        self.connection.commit()
+        try:
+            self.log.info(f'updating product {adid} {keyword}')
+            query = f'UPDATE products SET active_ads=?, country=?, adtitle=?, keyword=?, pageurl=?, adsonpage=?, adurl=?, creation_time=?, tag=? WHERE adid=?'
+            self.cursor.execute(query, (active_ads, country, self.sanitize(adtitle), keyword, pageurl, adsonpage, adurl, creation_time, tag, adid))
+            self.connection.commit()
+        except:
+            self.log.info('error while executing database query')
 
     def run(self):
         self.get_cookies()
         ua = UserAgent()
         s = requests.Session()
-        link = f'https://www.facebook.com/ads/library/async/search_ads/?q={self.keyword}&session_id={self.cookies["sessionid"]}&count=30&active_status=all&ad_type=all&countries[0]={self.country_alpha2}&media_type=all&search_type=keyword_unordered'
+        # link = f'https://www.facebook.com/ads/library/async/search_ads/?q={self.keyword}&session_id={self.cookies["sessionid"]}&count=30&active_status=all&ad_type=all&countries[0]={self.country_alpha2}&start_date[min]={self.date_from}&start_date[max]={self.date_to}&media_type=all&search_type=keyword_unordered'
         s.headers['User-Agent'] = ua.Chrome
         s.headers['Content-Type'] = 'application/x-www-form-urlencoded'
         s.headers['Host'] = 'web.facebook.com'
         s.headers['Origin'] = 'https://web.facebook.com'
-        s.headers['Referer'] = link
-        s.headers['x-fb-lsd'] = self.cookies['lsd']
+        s.headers['Referer'] = self.referrer
         s.headers['Sec-Fetch-Site'] = 'same-origin'
-        # s.headers['Accept'] = '*/*'
-        # s.headers['Accept-Encoding'] = 'gzip, deflate, br'
-        # s.headers['Connection'] = 'keep-alive'
 
-        while self.cookies['forwardCursor'] != None:
+        now = datetime.now()
+
+        while self.cookies['forwardCursor'] != None and now - self.spawnTime < timedelta(seconds=self.maxTimeAllowed):
+            now = datetime.now()
+            link = f'https://www.facebook.com/ads/library/async/search_ads/?q={self.keyword}&forward_cursor={self.cookies["forwardCursor"]}&session_id={self.cookies["sessionid"]}&collation_token={self.cookies["collationToken"]}&count=16&active_status=all&ad_type=all&countries[0]={self.country_alpha2}&start_date[min]={self.date_from}&start_date[max]={self.date_to}&media_type=all&search_type=keyword_unordered'
             payload = {
                 '__user': 0,
                 '__a': 1,
@@ -191,41 +200,27 @@ class FacebookScraperWorker():
                 'forward_cursor': self.cookies['forwardCursor'],
                 'collation_token': self.cookies['collationToken']
             }
-            # pp.pprint(payload)
-            # pp.pprint(s.headers)
+            s.headers['x-fb-lsd'] = self.cookies['lsd']
             result = self.rspost(link, s, data=payload, proxies=self.get_proxy()).text.replace('for (;;);', '')
-            parsed = json.loads(result)
+            try:
+                parsed = json.loads(result)
+            except:
+                self.log.info('error parsing JSON result')
+                continue
             try:
                 containers = parsed['payload']['results']
-                self.cookies['collationToken'] = parsed['payload']['collationToken']
-                self.cookies['forwardCursor'] = parsed['payload']['forwardCursor']
-                self.log.info(f'{parsed["payload"]["forwardCursor"]}')
-                self.log.info(f'{parsed["payload"]["collationToken"]}')
             except Exception as e:
-                # print(f'parsed: {parsed["errorSummary"]}')
-                # print(link)
                 self.log.info(f'declined ad {self.country_alpha2} {self.keyword}: {parsed["errorSummary"]}, retrying')
-                # self.log.info(e)
-                # self.log.info(parsed)
-                self.get_cookies(keepsession=True)
+                self.get_cookies(keepcursor=True)
                 time.sleep(self.sleep)
                 continue
             
-            if self.cookies['collationToken'] == parsed['payload']['collationToken']:
-                print('WARNING!')
-            if self.cookies['forwardCursor'] == parsed['payload']['forwardCursor']:
-                print('WARNING!')
- 
-            self.log.info(self.cookies['collationToken'])
-            self.log.info(self.cookies['forwardCursor'])
+            self.cookies['collationToken'] = parsed['payload']['collationToken']
+            self.cookies['forwardCursor'] = parsed['payload']['forwardCursor']
             
             for ad  in containers:
                 ad = ad[0]
                 adid = ad['adArchiveID']
-                # if adid not in self.ids:
-                #     self.ids.append(adid)
-                # else:
-                #     print(f'{self.keyword} warning!!')
                 active_ads = ad['collationCount']
                 try:
                     adtitle = ad['snapshot']['title']
@@ -237,7 +232,6 @@ class FacebookScraperWorker():
                             adtitle = ad['snapshot']['page_name']
                         except:
                             adtitle = "MISSING"
-
                 try:
                     pageurl = ad['snapshot']['link_url']
                     domain = re.search("https+://(www.)*[a-zA-Z0-9-]*.[a-zA-Z0]*", pageurl).group().replace("https", "").replace("http", "").replace("://", "").replace("www.", "")
@@ -251,11 +245,9 @@ class FacebookScraperWorker():
                 except:
                     creation_time = datetime.fromtimestamp(ad["startDate"])
                 adurl = f'https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ALL&q={adid}&sort_data[direction]=desc&sort_data[mode]=relevancy_monthly_grouped&search_type=keyword_unordered&media_type=all'
-                # ACTIVE ADS CAN BE NONE BUT AD CAN BE ACTIVE: SET TO 1?
                 if active_ads and int(active_ads) >= int(self.active_ads) and pageurl != '':
                     check = self.get_product(adid)
                     if check:
-                        print('HELLOOOO')
                         self.update_product(adid, active_ads, self.country_alpha2, adtitle, self.keyword, pageurl, adsonpage, adurl, creation_time)
                     else:
                         self.create_product(adid, active_ads, self.country_alpha2, adtitle, self.keyword, pageurl, adsonpage, adurl, creation_time)
@@ -269,6 +261,7 @@ class FacebookScraperMaster():
     log = None
     connection = None
     cursor = None
+    maxTimeAllowed = 60*15 # seconds
 
     def __init__(self, db_path='found.db') -> None:
         if not os.path.exists('logs'):
@@ -282,18 +275,23 @@ class FacebookScraperMaster():
         self.log.addHandler(logging.StreamHandler(sys.stdout))
         self.connection = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.connection.cursor()
-    
+        self.check_db()
+
     def __del__(self):
         self.connection.close()
 
     def get_filters(self):
-        return list(map(lambda filter: {
-            'active_ads': filter[1],
-            'date_from': filter[2],
-            'date_to': filter[3],
-            'country': filter[4],
-            'keywords': filter[5].split(',')
-        }, self.connection.execute("SELECT * FROM filters").fetchall()))
+        try:
+            return list(map(lambda filter: {
+                'active_ads': filter[1],
+                'date_from': filter[2],
+                'date_to': filter[3],
+                'country': filter[4],
+                'keywords': filter[5].split(',')
+            }, self.cursor.execute("SELECT * FROM filters").fetchall()))
+        except:
+            self.log.info('error while executing database query')
+
 
     def run(self):
         filters = self.get_filters()
@@ -301,6 +299,7 @@ class FacebookScraperMaster():
         for filter in filters:
             for index, keyword in enumerate(filter['keywords']):
                 worker = FacebookScraperWorker(
+                    maxTimeAllowed=self.maxTimeAllowed,
                     id=index,
                     active_ads = int(filter['active_ads']),
                     date_from = filter['date_from'],
@@ -314,7 +313,15 @@ class FacebookScraperMaster():
 
         for t in threads:
             t.join()
-        
+    
+    def check_db(self):
+        try:
+            self.cursor.execute('SELECT * FROM products')
+            self.cursor.execute('SELECT * FROM filters')
+        except:
+            self.cursor.execute("CREATE TABLE IF NOT EXISTS filters(id INTEGER PRIMARY KEY, active_ads INTEGER, date_from TEXT, date_to TEXT, country TEXT, keywords TEXT)")
+            self.cursor.execute("CREATE TABLE IF NOT EXISTS products(adid INTEGER PRIMARY KEY, active_ads INTEGER, country TEXT, adtitle TEXT, keyword TEXT, pageurl TEXT, adsonpage TEXT, adurl TEXT, creation_time TEXT, tag TEXT)")
+
 
 master = FacebookScraperMaster()
 master.run()
