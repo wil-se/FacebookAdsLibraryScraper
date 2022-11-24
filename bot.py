@@ -1,9 +1,4 @@
 import requests
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 import sqlite3
 import logging
 from logging import handlers
@@ -12,7 +7,6 @@ import os
 import re
 import json
 import pycountry
-from requests_html import HTMLSession
 from fake_useragent import UserAgent
 import threading
 from datetime import datetime, timedelta
@@ -40,9 +34,10 @@ class FacebookScraperWorker():
     referrer = ''
     spawnTime = datetime.now()
     maxTimeAllowed = 15*60 # seconds
+    proxy = None
     
     
-    def __init__(self, maxTimeAllowed=15*60, settings="./config.cfg", db_path='found.db', sleep=10, id=0, active_ads=1, date_from="", date_to="", country="", keyword=""):
+    def __init__(self, maxTimeAllowed=15*60, settings=os.path.abspath("proxy_credentials.cfg"), db_path=os.path.abspath('found.db'), sleep=10, id=0, active_ads=1, date_from="", date_to="", country="", keyword=""):
         self.maxTimeAllowed = maxTimeAllowed
         self.settings = settings
         self.connection = sqlite3.connect(db_path, check_same_thread=False)
@@ -59,11 +54,12 @@ class FacebookScraperWorker():
         self.log = logging.getLogger(f'FacebookWorker_{self.id}_{self.keyword}_{random.randint(0, 99999999999)}')
         FORMAT = '[%(asctime)s %(filename)s->%(funcName)s():%(lineno)s]%(levelname)s: %(message)s'
         logfile = time.strftime(f'logs/worker_{id}_{self.country_alpha2}_{keyword}_%Y-%m-%d.log')
-        logging.basicConfig(level=logging.INFO, filename=logfile, filemode='a+', format=FORMAT)
-        handler = handlers.RotatingFileHandler(logfile, maxBytes=1000000, backupCount=10)
-        self.log.addHandler(handler)
+        # logging.basicConfig(level=logging.INFO, filename=logfile, filemode='a+', format=FORMAT)
+        # handler = handlers.RotatingFileHandler(logfile, maxBytes=1000000, backupCount=10)
+        # self.log.addHandler(handler)
         self.log.addHandler(logging.StreamHandler(sys.stdout))
         self.referrer = f'https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country={self.country_alpha2}&media_type=all'
+        self.proxy = self.get_proxy()
 
     def __del__(self):
         self.connection.close()
@@ -113,16 +109,13 @@ class FacebookScraperWorker():
                 'https': url
             }
         except:
-            self.log.info('there was an error while loading configurations, please check config.cfg')
-            return {
-                'http': '',
-                'https': ''
-            }
+            self.log.info('there was an error while loading configurations, please check proxy_credentials.cfg')
+            exit()
 
     def get_cookies(self, keepsession=False, keepcursor=False):
         try:
             self.log.info(f'Getting cookies {self.country_alpha2} {self.keyword}')
-            r = self.rget(self.referrer, proxies=self.get_proxy())
+            r = self.rget(self.referrer, proxies=self.proxy)
             response_text = r.text
             self.cookies['user_id'] = re.findall('USER_ID\\":\\"(.*?)\\",', response_text)[0]
             self.cookies['lsd'] = re.findall('LSD[^:]+:\\"(.*?)\\"', response_text)[0]
@@ -181,10 +174,10 @@ class FacebookScraperWorker():
         s.headers['Referer'] = self.referrer
         s.headers['Sec-Fetch-Site'] = 'same-origin'
 
-        now = datetime.now()
-
-        while self.cookies['forwardCursor'] != None and now - self.spawnTime < timedelta(seconds=self.maxTimeAllowed):
+        while self.cookies['forwardCursor'] != None:
             now = datetime.now()
+            if (now - self.spawnTime).seconds > self.maxTimeAllowed:
+                quit()
             link = f'https://www.facebook.com/ads/library/async/search_ads/?q={self.keyword}&forward_cursor={self.cookies["forwardCursor"]}&session_id={self.cookies["sessionid"]}&collation_token={self.cookies["collationToken"]}&count=16&active_status=all&ad_type=all&countries[0]={self.country_alpha2}&start_date[min]={self.date_from}&start_date[max]={self.date_to}&media_type=all&search_type=keyword_unordered'
             payload = {
                 '__user': 0,
@@ -201,7 +194,7 @@ class FacebookScraperWorker():
                 'collation_token': self.cookies['collationToken']
             }
             s.headers['x-fb-lsd'] = self.cookies['lsd']
-            result = self.rspost(link, s, data=payload, proxies=self.get_proxy()).text.replace('for (;;);', '')
+            result = self.rspost(link, s, data=payload, proxies=self.proxy).text.replace('for (;;);', '')
             try:
                 parsed = json.loads(result)
             except:
@@ -261,7 +254,7 @@ class FacebookScraperMaster():
     log = None
     connection = None
     cursor = None
-    maxTimeAllowed = 60*15 # seconds
+    maxTimeAllowed = 60*15
 
     def __init__(self, db_path='found.db') -> None:
         if not os.path.exists('logs'):
@@ -313,14 +306,14 @@ class FacebookScraperMaster():
 
         for t in threads:
             t.join()
+        quit()
     
     def check_db(self):
         try:
-            self.cursor.execute('SELECT * FROM products')
-            self.cursor.execute('SELECT * FROM filters')
-        except:
             self.cursor.execute("CREATE TABLE IF NOT EXISTS filters(id INTEGER PRIMARY KEY, active_ads INTEGER, date_from TEXT, date_to TEXT, country TEXT, keywords TEXT)")
-            self.cursor.execute("CREATE TABLE IF NOT EXISTS products(adid INTEGER PRIMARY KEY, active_ads INTEGER, country TEXT, adtitle TEXT, keyword TEXT, pageurl TEXT, adsonpage TEXT, adurl TEXT, creation_time TEXT, tag TEXT)")
+            self.cursor.execute("CREATE TABLE IF NOT EXISTS products(adid INTEGER PRIMARY KEY, active_ads INTEGER, country TEXT, adtitle TEXT, keyword TEXT, pageurl UINQUE TEXT, adsonpage TEXT, adurl TEXT, creation_time TEXT, tag TEXT)")
+        except:
+            self.log.info("Database error occured")
 
 
 master = FacebookScraperMaster()
