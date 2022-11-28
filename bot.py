@@ -15,6 +15,23 @@ import random
 from pprint import PrettyPrinter
 import sys
 pp = PrettyPrinter()
+import platform
+from colorama import Fore, init
+from Crypto.Signature import PKCS1_v1_5
+from Crypto.PublicKey import RSA
+from Crypto.Hash import SHA256
+
+
+if platform.system() == 'Windows':
+    init(convert=True)
+
+WARNING = Fore.YELLOW
+ERROR = Fore.RED
+SUCCESS = Fore.GREEN
+INFO = Fore.CYAN
+RESET = Fore.RESET
+SECONDS_IN_A_DAY = 86400
+SECONDS_IN_A_HOUR = 3600
 
 
 class FacebookScraperWorker():
@@ -269,6 +286,8 @@ class FacebookScraperMaster():
         self.connection = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.connection.cursor()
         self.check_db()
+        if not self.check_license():
+            quit()
 
     def __del__(self):
         self.connection.close()
@@ -315,6 +334,44 @@ class FacebookScraperMaster():
         except:
             self.log.info("Database error occured")
 
+    def check_license(self):
+        res = None
+        try:
+            res = requests.get('https://exodia.site:8000/api/checklicense')
+            if res.status_code != 200 and res.status_code != 403:
+                print(f"{ERROR}[LICENSE] Cannot contact license server. Please contact the customer service..{RESET}")
+                return False
+        except Exception as e:
+            self.log.error(e)
+            print(f"{ERROR}[LICENSE] Cannot contact license server. Please contact the customer service..{RESET}")
+            return False
+        
+        if res.status_code == 403:
+            print(f"{ERROR}[LICENSE] Invalid license detected. Shutting down.{RESET}")
+            return False
+    
+        response = res.json()
+        try:
+            sig = response['signature']
+            sig = bytes.fromhex(sig)
+            
+            message = "exodialicensecheck2022".encode('utf8')
+            digest = SHA256.new()
+            digest.update(message)
+                
+            # Load public key (not private key) and verify signature
+            public_key = RSA.importKey(open("license.pem").read())
+            verifier = PKCS1_v1_5.new(public_key)
+    
+            if verifier.verify(digest, sig):
+                print(f"{SUCCESS}[LICENSE] License verified succesfully.{RESET}")
+                return True
+            print(f"{ERROR}[LICENSE] Invalid signature. Shutting down.{RESET}")
+            return False
+        except Exception as e:
+            print(e)
+            print(f"{ERROR}[LICENSE] Cannot verify license. Please contact the customer service.{RESET}")
+        return False
 
 master = FacebookScraperMaster()
 master.run()
